@@ -3,12 +3,25 @@
 #include <linux/kmod.h>
 #include <linux/kprobes.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/namei.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <asm/cpufeature.h>
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DFRoot LKM");
+
+/* The exploit passes the manager package and the two switches through insmod
+ * parameters (the shellcode builds the insmod argv from its string slots).
+ * flags bit0 soft reboot, bit1 disable modules. The staged ksud path is not
+ * passed on the command line: it rides in a 160-byte slot inside this image
+ * that the exploit overwrites before writing the module out, so it has to be
+ * a real initialized array, not a pointer. */
+static char package_name[64] = "";
+module_param_string(package_name, package_name, sizeof(package_name), 0);
+static char ksud_path[160] = "DFROOT_KSUD_PATH_SLOT";
+static int flags;
+module_param(flags, int, 0);
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 typedef unsigned long (*module_kallsyms_lookup_name_t)(const char *name);
@@ -75,21 +88,43 @@ static int __nocfi __init dfroot_init(void)
     void *info;
     int ret;
 
-    // UMH command to run. Upstream 4.2-4.5 replaced the old
-    // "touch /dev/dfm0; rmmod oplus_* 2>/dev/null; exit 0" chain. Those rmmods
-    // tripped the Oppo/OnePlus security anti-tamper reset (our issue #21), and
-    // because `sh -c` returns the exit code of the LAST command, a failing
-    // rmmod also made the helper report "returned 256" everywhere else, which
-    // is what killed the run at the verify stage (our issue #5). The vendor
-    // hardening checks are now patched in-kernel with aarch64_insn_patch_text,
-    // the helper only touches the marker and execs bootstrap, and the call is
-    // UMH_WAIT_EXEC, so there is no child exit status left to leak.
+    // UMH command to run. The chisewaguri architecture: the module execs the
+    // staged ksud directly, so no bootstrap binary and no prefs parsing ever
+    // run on the root side - everything arrives via the insmod parameters
+    // above. The helper is UMH_WAIT_EXEC so no child exit status is left to
+    // leak (the old UMH_WAIT_PROC wait was half of the MTK reboot, #5).
+    //
+    // Marker hygiene (WorldMargin): /dev is a tmpfs the framework soft-reboot
+    // never clears, so markers from a failed run would block every rerun
+    // until a power cycle. They are cleared up front and again on the failure
+    // path, where /dev/df is removed last so the one-shot mutex lets the next
+    // run through; the shellcode recreates it if the hook is still live.
     static const char sh[] = "/system/bin/sh";
-    static const char bootstrap[] = "/data/user_de/0/df.root/bootstrap";
-    static char cmd[512];
+    static char cmd[1024];
     static char *envp[] = { "PATH=/system/bin", NULL };
     static char *argv[] = { (char *)sh, "-c", cmd, NULL };
-    snprintf(cmd, sizeof(cmd), "touch /dev/dfm0; exec %s", bootstrap);
+    snprintf(cmd, sizeof(cmd),
+        "rm -f /dev/df /dev/dfm*;"
+        " touch /dev/dfm0;"
+        "%s"
+        " touch /dev/dfm5;"
+        " if \"%s\" late-load --package-name \"%s\"; then"
+        "  touch /dev/dfm6;"
+        "  if [ %d -ne 0 ]; then"
+        "   i=0;"
+        "   while pgrep -f 'ksud late-load' >/dev/null 2>&1 && [ $i -lt 30 ];"
+        "    do sleep 1; i=$((i+1)); done;"
+        "   \"%s\" soft-reboot;"
+        "  fi;"
+        " else"
+        "  rm -f /dev/df /dev/dfm*; touch /dev/dfme2;"
+        " fi",
+        (flags & 2)
+            ? " touch /dev/dfm4;"
+              " for d in /data/adb/modules/*/; do"
+              "  [ -d \"$d\" ] && touch \"$d/disable\"; done;"
+            : "",
+        ksud_path, package_name, flags & 1, ksud_path);
 
     // Symbol finder
     kln_kp = (struct kprobe){ .symbol_name = "kallsyms_lookup_name" };

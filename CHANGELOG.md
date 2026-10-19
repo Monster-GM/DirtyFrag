@@ -2,12 +2,41 @@
 
 ## Unreleased
 
+### Ported - chisewaguri parameter-slot architecture (no bootstrap binary)
+
+- The kernel module now takes the SU-manager package (`package_name`) and the
+  soft-reboot/disable-modules switches (`flags`) as insmod parameters instead
+  of a bootstrap binary reading the app's prefs XML: the shellcode fills
+  `package_name=`/`flags=` string slots in libcxx.S and hands them to insmod as
+  extra argv. The staged ksud path is not even passed on the command line - it
+  rides in a 160-byte `DFROOT_KSUD_PATH_SLOT` slot inside the ko image, which
+  `patch_ko()` fills in on its padded heap copy before the module is written
+  into the vendor page cache. `bootstrap.c` is deleted; the module's UMH
+  command runs `ksud late-load` directly. What is deliberately kept from
+  mitschud: the in-kernel oplus/DEFEX `patch_fn_ret_zero` hardening (the
+  standalone branch still rmmods oplus_* and re-trips OnePlus anti-tamper,
+  #21), the full progress-marker scheme, UMH_WAIT_EXEC and the -ENODEV
+  self-unload. Trade-off: bootstrap's zygote-env adoption and partition-RO
+  protection are gone with it, as in the standalone branch.
+- Stale-marker hygiene (WorldMargin): `/dev` is a tmpfs the framework
+  soft-reboot never clears, so markers from a failed run blocked every rerun
+  until a power cycle. The module's UMH command now clears `/dev/df` and the
+  `dfm*` markers up front, and on the ksud failure path clears them again
+  before touching `dfme2` so the next run starts clean.
+- crash_dump64 page-cache restore (vjaykrsna/DFRoot 45f529d): the patched
+  helper was only ever restored by the module's cache invalidation, which
+  never happens when the module fails to load - a real tombstone later in the
+  boot would exec the injected helper. `exploit()` now drops the patched pages
+  with `posix_fadvise(POSIX_FADV_DONTNEED)` on its way out, success or not.
+  The rest of that PR (direct vendor pread/splice, readback, retry) was
+  retracted by its own author as agent-written guesswork and is not taken.
+
 - Watching [chisewaguri/DFRoot](https://github.com/chisewaguri/DFRoot/tree/upstream-standalone): it drops
   the separate bootstrap binary and the staged copy of ksud, and has the kernel module exec the selected
   manager's own `libksud.so`, passing the package name and both switches as insmod parameters. That is
   worth taking once it is rebased onto upstream 4.5 and lands upstream - on its own the branch re-adds the
   `rmmod oplus_*` chain behind issue #21, and it only writes the `dfm0`/`dfm1` markers our progress bar
-  does not read.
+  does not read. [Ported above, minus the regressions.]
 
 ## 1.16
 

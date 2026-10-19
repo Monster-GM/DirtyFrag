@@ -16,9 +16,9 @@ import java.io.File;
  *  - Soft reboot at boot only ever happens when the user explicitly opted in
  *    on the Autorun card (same as pre-3.2 behaviour).
  *
- * Since upstream 3.2 the exploit binary no longer takes a soft-reboot flag:
- * the LKM execs "bootstrap", which reads soft_reboot / su_manager /
- * disable_modules directly out of the device-encrypted prefs at
+ * The exploit binary takes the SU manager and the soft-reboot /
+ * disable-modules switches as command-line arguments, which
+ * ExploitRunner.run reads out of the device-encrypted prefs at
  * /data/user_de/0/df.root/shared_prefs/dfroot.xml. BootReceiver therefore
  * mirrors the user's choice into that key before starting the run.
  */
@@ -50,7 +50,8 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
         // after late-load completes - so Zygisk/LSPosed modules (which need a
         // fresh Zygote with the module loaded) become active in the same power
         // session. With it off, the exploit still roots the device but nothing
-        // reboots. bootstrap reads this from the pref, not from argv.
+        // reboots. ExploitRunner reads this pref and passes it to the exploit
+        // on argv, not from the root side.
         deCtx.getSharedPreferences("dfroot", Context.MODE_PRIVATE)
                 .edit().putBoolean("soft_reboot", autoSoftReboot).apply();
 

@@ -71,9 +71,9 @@ public class MainActivity extends AppCompatActivity implements IReporter {
     private D2Status.Result mOdin;
     private boolean moduleRefresh;
 
-    /** Device-protected storage context: bootstrap.c reads its prefs from
-     *  /data/user_de/0/df.root/, so every pref the exploit depends on must live
-     *  there, not in credential-protected storage. */
+    /** Device-protected storage context: ExploitRunner reads the exploit's
+     *  prefs from /data/user_de/0/df.root/, so every pref the exploit depends
+     *  on must live there, not in credential-protected storage. */
     private Context mDeCtx;
     /** Package name of the SU manager whose libksud.so gets staged, or null. */
     private String suManagerPkg;
@@ -155,8 +155,9 @@ public class MainActivity extends AppCompatActivity implements IReporter {
     /** Translates raw native log lines into two-step progress-bar states.
      *  STRICTLY LINEAR: seg 1 (the exploit run) climbs to 100% and only then does seg 2
      *  (verification) start climbing. The two bars never move at the same time.
-     *  Seg 1 tracks setup + file patching + the hook firing; seg 2 tracks the bootstrap,
-     *  which reports progress by touching /dev/dfm* nodes that exp.c polls for 70 seconds. */
+     *  Seg 1 tracks setup + file patching + the hook firing; seg 2 tracks the kernel
+     *  module launching ksud, which reports progress by touching /dev/dfm* nodes that
+     *  exp.c polls for 70 seconds. */
     private void driveProgress(String t) {
         if (t.isEmpty()) return;
         // v4.0 marker table: a failure is reported as "<stage>: ERROR - <reason>".
@@ -208,28 +209,17 @@ public class MainActivity extends AppCompatActivity implements IReporter {
         if (t.startsWith("libc++: loading custom module")) {
             setSeg1(1f);
         }
-        // Verification bar: one step per bootstrap marker (see exp.c markers[]).
-        // v4.0 renamed every marker and dropped the "env adopted" / "partitions set
-        // ro" confirmations, so these steps are re-keyed to the new table.
-        if (t.startsWith("kernel module: launching bootstrap")) {
-            setSeg2(0.14f, "Verification", 0xFFFFFFFF);
+        // Verification bar: one step per module marker (see exp.c markers[]).
+        // The bootstrap stages are gone (chisewaguri architecture): the module
+        // launches ksud directly, so the bar re-keys to the shorter table.
+        if (t.startsWith("kernel module: launching ksud")) {
+            setSeg2(0.2f, "Verification", 0xFFFFFFFF);
         }
-        if (t.startsWith("bootstrap: loading app preferences file")) {
-            setSeg2(0.28f, "Verification", 0xFFFFFFFF);
+        if (t.startsWith("disabling ksu modules")) {
+            setSeg2(0.45f, "Verification", 0xFFFFFFFF);
         }
-        if (t.startsWith("bootstrap: cloning zygote env")
-                || t.startsWith("bootstrap: WARNING - clone zygote env failed")) {
-            setSeg2(0.42f, "Verification", 0xFFFFFFFF);
-        }
-        if (t.startsWith("bootstrap: setting partitions ro")
-                || t.startsWith("bootstrap: WARNING - set partitions ro failed")) {
-            setSeg2(0.57f, "Verification", 0xFFFFFFFF);
-        }
-        if (t.startsWith("bootstrap: disabling ksu modules")) {
-            setSeg2(0.71f, "Verification", 0xFFFFFFFF);
-        }
-        if (t.startsWith("bootstrap: starting SU daemon")) {
-            setSeg2(0.85f, "Verification", 0xFFFFFFFF);
+        if (t.startsWith("starting SU daemon")) {
+            setSeg2(0.7f, "Verification", 0xFFFFFFFF);
         }
         if (t.equals("ksud start: SUCCESS")) {
             setSeg1(1f);
@@ -494,8 +484,9 @@ public class MainActivity extends AppCompatActivity implements IReporter {
         });
 
         // KSU modules toggle: since 3.2 this is a plain preference, not a root
-        // operation. bootstrap.c reads disable_modules and touches a `disable`
-        // flag file in every installed module before ksud runs, so the toggle
+        // operation. ExploitRunner reads disable_modules and passes it to the
+        // exploit, whose kernel module touches a `disable` flag file in every
+        // installed module before ksud runs, so the toggle
         // works before the device is rooted and applies on the next root.
         moduleRefresh = true;
         binding.switchModules.setChecked(!mDeCtx.getSharedPreferences("dfroot", MODE_PRIVATE)
@@ -1142,10 +1133,11 @@ public class MainActivity extends AppCompatActivity implements IReporter {
     }
 
     /** Applies the Modules card. Since 3.2 this is a preference write, not a
-     *  root operation: bootstrap.c reads disable_modules and touches a
-     *  `disable` flag file in every installed module before it starts ksud
-     *  (a broken module otherwise bootloops the device). OFF = modules stay
-     *  disabled on the next root, ON = modules load. No su required. */
+     *  root operation: ExploitRunner reads disable_modules and the kernel
+     *  module touches a `disable` flag file in every installed module before
+     *  it starts ksud (a broken module otherwise bootloops the device). OFF =
+     *  modules stay disabled on the next root, ON = modules load. No su
+     *  required. */
     private void applyModuleState(boolean on) {
         SharedPreferences sp = mDeCtx.getSharedPreferences("dfroot", MODE_PRIVATE);
         SharedPreferences.Editor ed = sp.edit();
@@ -1845,7 +1837,8 @@ public class MainActivity extends AppCompatActivity implements IReporter {
     }
 
     private void runExploit() {
-        // bootstrap.c reads soft_reboot straight out of the DE prefs, so mirror
+        // ExploitRunner reads soft_reboot out of the DE prefs and passes it to
+        // the exploit on argv, so mirror
         // the Autorun card's choice into the key it reads right before launch.
         SharedPreferences sp = mDeCtx.getSharedPreferences("dfroot", MODE_PRIVATE);
         boolean autoSoftReboot = sp.getBoolean("auto_soft_reboot", false);
@@ -1854,7 +1847,7 @@ public class MainActivity extends AppCompatActivity implements IReporter {
         try {
             int rc = ExploitRunner.run(mDeCtx, this);
             if (rc != 0) {
-                // 0 ok, 1 ksud/bootstrap error, 2 poll timeout or bad setup,
+                // 0 ok, 1 ksud error, 2 poll timeout or bad setup,
                 // 3 failed to patch files (see exp.c markers[]).
                 String why = lastFailReason != null ? lastFailReason
                         : rc == 1 ? "ksud nonzero exit"
