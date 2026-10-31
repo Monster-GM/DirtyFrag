@@ -130,10 +130,11 @@ static bool vivo_vr_loaded(kern_path_t kern_path_fn, path_put_t path_put_fn)
         "/sys/module/vr_ko",    /* alternate build name */
     };
     struct path p;
+    size_t i;
 
     if (!kern_path_fn)
         return false;
-    for (size_t i = 0; i < ARRAY_SIZE(candidates); i++) {
+    for (i = 0; i < ARRAY_SIZE(candidates); i++) {
         if (kern_path_fn(candidates[i], 0, &p))
             continue;
         if (path_put_fn)
