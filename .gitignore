@@ -7,7 +7,7 @@
 .idea/
 build/
 app/build/
-app/.cxx/
+*/.cxx/
 
 # local settings
 local.properties
@@ -30,8 +30,7 @@ lkm/Module.symvers
 
 # Generated binaries
 out/
-app/src/main/jni/splicehelper
-app/src/main/jni/ko/*.ko
+exploit/src/main/jni/splicehelper
 
 # stale APK copies dropped at the repo root by hand
 /dirtyfrag.apk

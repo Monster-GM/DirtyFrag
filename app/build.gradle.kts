@@ -66,12 +66,6 @@ androidComponents {
         buildConfig = true
     }
 
-    externalNativeBuild {
-        cmake {
-            path("src/main/jni/CMakeLists.txt")
-        }
-    }
-
     packaging {
         jniLibs {
             useLegacyPackaging = true
@@ -80,6 +74,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation(project(":exploit"))
     implementation(libs.androidx.appcompat)
     implementation(libs.material)
     implementation(libs.androidx.constraintlayout)

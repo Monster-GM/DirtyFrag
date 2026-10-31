@@ -28,6 +28,10 @@ import androidx.core.content.res.ResourcesCompat;
 import androidx.appcompat.app.AppCompatActivity;
 
 import df.root.databinding.ActivityMainBinding;
+import df.root.exploit.ExploitOptions;
+import df.root.exploit.ExploitResult;
+import df.root.exploit.ExploitRunner;
+import df.root.exploit.IReporter;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -71,9 +75,9 @@ public class MainActivity extends AppCompatActivity implements IReporter {
     private D2Status.Result mOdin;
     private boolean moduleRefresh;
 
-    /** Device-protected storage context: bootstrap.c reads its prefs from
-     *  /data/user_de/0/df.root/, so every pref the exploit depends on must live
-     *  there, not in credential-protected storage. */
+    /** Device-protected storage context: the native bootstrap reads its prefs
+     *  from the app's device-protected dir, so every pref the exploit depends on
+     *  must live there, not in credential-protected storage. */
     private Context mDeCtx;
     /** Package name of the SU manager whose libksud.so gets staged, or null. */
     private String suManagerPkg;
@@ -1173,7 +1177,7 @@ public class MainActivity extends AppCompatActivity implements IReporter {
     }
 
     /** Every installed app carrying libksud.so in its native lib dir - exactly
-     *  the set ExploitRunner.stageAssets() can use, so anything listed here is
+     *  the set the exploit library can stage, so anything listed here is
      *  guaranteed to pass the runtime check too. */
     private List<SuManagerEntry> scanSuManagers() {
         List<SuManagerEntry> out = new ArrayList<>();
@@ -1845,25 +1849,25 @@ public class MainActivity extends AppCompatActivity implements IReporter {
     }
 
     private void runExploit() {
-        // bootstrap.c reads soft_reboot straight out of the DE prefs, so mirror
-        // the Autorun card's choice into the key it reads right before launch.
         SharedPreferences sp = mDeCtx.getSharedPreferences("dfroot", MODE_PRIVATE);
         boolean autoSoftReboot = sp.getBoolean("auto_soft_reboot", false);
-        sp.edit().putBoolean("soft_reboot", autoSoftReboot).apply();
+        boolean disableModules = sp.getBoolean("disable_modules", false);
         lastFailReason = null;
         try {
-            int rc = ExploitRunner.run(mDeCtx, this);
-            if (rc != 0) {
+            ExploitResult result = ExploitRunner.run(mDeCtx,
+                    new ExploitOptions(suManagerPkg, autoSoftReboot, disableModules), this);
+            boolean ok = result == ExploitResult.OK || result == ExploitResult.ALREADY_HOOKED;
+            if (!ok) {
                 // 0 ok, 1 ksud/bootstrap error, 2 poll timeout or bad setup,
                 // 3 failed to patch files (see exp.c markers[]).
                 String why = lastFailReason != null ? lastFailReason
-                        : rc == 1 ? "ksud nonzero exit"
-                        : rc == 2 ? "check logcat & dmesg"
-                        : "failed to patch files";
+                        : result == ExploitResult.KSUD_FAILED ? "ksud nonzero exit"
+                        : result == ExploitResult.TIMEOUT ? "check logcat & dmesg"
+                        : result == ExploitResult.PATCH_FAILED ? "failed to patch files"
+                        : "setup failed";
                 report("\n=== exploit failed: " + why + " ===\n");
             }
-            mDeCtx.getSharedPreferences("dfroot", MODE_PRIVATE)
-                    .edit().putBoolean("last_run_success", rc == 0).apply();
+            sp.edit().putBoolean("last_run_success", ok).apply();
         } catch (Exception e) {
             Log.e(TAG, "exploit exception", e);
             report("\nexception: " + e + "\n");

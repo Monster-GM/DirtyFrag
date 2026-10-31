@@ -4,11 +4,15 @@ import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.PowerManager;
 import android.util.Log;
 
-import java.io.File;
+import df.root.exploit.ExploitOptions;
+import df.root.exploit.ExploitResult;
+import df.root.exploit.ExploitRunner;
+import df.root.exploit.IReporter;
 
 /**
  * Auto-root on boot. Safety rules learned in the field:
@@ -16,11 +20,9 @@ import java.io.File;
  *  - Soft reboot at boot only ever happens when the user explicitly opted in
  *    on the Autorun card (same as pre-3.2 behaviour).
  *
- * Since upstream 3.2 the exploit binary no longer takes a soft-reboot flag:
- * the LKM execs "bootstrap", which reads soft_reboot / su_manager /
- * disable_modules directly out of the device-encrypted prefs at
- * /data/user_de/0/df.root/shared_prefs/dfroot.xml. BootReceiver therefore
- * mirrors the user's choice into that key before starting the run.
+ * The exploit library writes soft_reboot / su_manager / disable_modules into the
+ * device-protected prefs itself, so this receiver only has to decide whether to
+ * run and with which options.
  */
 public class BootReceiver extends BroadcastReceiver implements IReporter {
     private static final String TAG = "dfroot";
@@ -32,27 +34,31 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
 
     @Override
     public void onReceive(Context context, Intent intent) {
-        if (new File("/dev/df").exists()) {
+        if (ExploitRunner.isAlreadyHooked()) {
             Log.i(TAG, "boot: already hooked, skipping");
             return;
         }
         Log.i(TAG, "boot: " + intent.getAction());
         final Context deCtx = context.createDeviceProtectedStorageContext();
-        boolean expert = deCtx.getSharedPreferences("dfroot", Context.MODE_PRIVATE)
-                .getBoolean("expert_mode", false);
+        SharedPreferences sp = deCtx.getSharedPreferences(ExploitRunner.PREFS_NAME,
+                Context.MODE_PRIVATE);
+        boolean expert = sp.getBoolean("expert_mode", false);
         if (!expert) {
             Log.i(TAG, "boot: expert mode off - autorun skipped");
             return;
         }
-        boolean autoSoftReboot = deCtx.getSharedPreferences("dfroot", Context.MODE_PRIVATE)
-                .getBoolean("auto_soft_reboot", false);
+        String suManager = sp.getString("su_manager", null);
+        if (suManager == null) {
+            Log.i(TAG, "boot: no SU manager selected - autorun skipped");
+            return;
+        }
+        boolean autoSoftReboot = sp.getBoolean("auto_soft_reboot", false);
+        boolean disableModules = sp.getBoolean("disable_modules", false);
         // auto_soft_reboot=true: on success, ksud triggers its OWN soft reboot
         // after late-load completes - so Zygisk/LSPosed modules (which need a
         // fresh Zygote with the module loaded) become active in the same power
         // session. With it off, the exploit still roots the device but nothing
-        // reboots. bootstrap reads this from the pref, not from argv.
-        deCtx.getSharedPreferences("dfroot", Context.MODE_PRIVATE)
-                .edit().putBoolean("soft_reboot", autoSoftReboot).apply();
+        // reboots.
 
         PowerManager pm = (PowerManager) context.getSystemService(Context.POWER_SERVICE);
         PowerManager.WakeLock wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "dfroot:boot");
@@ -60,9 +66,10 @@ public class BootReceiver extends BroadcastReceiver implements IReporter {
         new Thread(() -> {
             boolean ok = false;
             try {
-                int rc = ExploitRunner.run(deCtx, this);
-                Log.i(TAG, "boot: exploit rc=" + rc);
-                ok = rc == 0;
+                ExploitResult result = ExploitRunner.run(deCtx,
+                        new ExploitOptions(suManager, autoSoftReboot, disableModules), this);
+                Log.i(TAG, "boot: exploit " + result);
+                ok = result == ExploitResult.OK || result == ExploitResult.ALREADY_HOOKED;
             } catch (Exception e) {
                 Log.e(TAG, "boot: exploit exception", e);
             } finally {

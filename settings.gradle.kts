@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "DirtyFrag"
 include(":app")
+include(":exploit")

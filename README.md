@@ -94,6 +94,11 @@ JAVA_HOME="<Android Studio jbr>" ./gradlew assembleRelease
 
 The APK is written to `app/build/outputs/apk/release/dirtyfrag.apk`.
 
+The headless exploit library builds as an AAR with
+`./gradlew :exploit:assembleRelease` -> `exploit/build/outputs/aar/exploit-release.aar`.
+Consumers must keep native lib extraction enabled (`useLegacyPackaging` /
+`extractNativeLibs="true"`), because the exploit execs `libdfroot.so` from `nativeLibraryDir`.
+
 Release builds are signed with `app/keystore.jks`, which is gitignored (the signing config expects
 alias `dirtyfrag` and `dirtyfrag` for both passwords). Generate your own before building:
 
@@ -103,7 +108,7 @@ keytool -genkeypair -v -keystore app/keystore.jks -alias dirtyfrag \
   -storepass dirtyfrag -keypass dirtyfrag
 ```
 
-The eight prebuilt kernel modules are committed under `app/src/main/jni/ko/`. Upstream gitignores
+The eight prebuilt kernel modules are committed under `exploit/src/main/jni/ko/`. Upstream gitignores
 them and builds them per-KMI in CI; this fork commits them so a plain clone builds without a DDK
 toolchain. They are built by this repo's `Build` workflow (the `LKMs / <kmi>` jobs) from the
 current `lkm/dfroot.c`, so they must be rebuilt whenever that file changes: run the workflow,

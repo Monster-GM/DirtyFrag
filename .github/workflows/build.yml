@@ -82,7 +82,7 @@ jobs:
         with:
           pattern: df-lkm-*
           merge-multiple: true
-          path: app/src/main/jni/ko/
+          path: exploit/src/main/jni/ko/
 
       - uses: actions/setup-java@v6
         with:

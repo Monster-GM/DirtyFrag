@@ -3,9 +3,11 @@
 #include <linux/kmod.h>
 #include <linux/kprobes.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/namei.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <asm/cpufeature.h>
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("DFRoot LKM");
@@ -19,6 +21,13 @@ typedef int  (*kern_path_t)(const char *, unsigned int, struct path *);
 typedef int  (*invalidate_t)(struct address_space *);
 typedef void (*path_put_t)(const struct path *);
 typedef int  (*insn_patch_t)(void *addrs[], u32 insns[], int cnt);
+
+/* Device-protected data dir of the calling app, passed by the shellcode as
+ * "df_data_dir=<dir>" through insmod: bootstrap is staged at <dir>/bootstrap,
+ * so the chain is no longer tied to one package name. */
+static char *df_data_dir;
+module_param(df_data_dir, charp, 0400);
+MODULE_PARM_DESC(df_data_dir, "Device-protected data dir of the calling app");
 
 static insn_patch_t insn_patch_text;
 
@@ -85,11 +94,26 @@ static int __nocfi __init dfroot_init(void)
     // the helper only touches the marker and execs bootstrap, and the call is
     // UMH_WAIT_EXEC, so there is no child exit status left to leak.
     static const char sh[] = "/system/bin/sh";
-    static const char bootstrap[] = "/data/user_de/0/df.root/bootstrap";
+    static const char bootstrap_default[] = "/data/user_de/0/df.root/bootstrap";
+    static char bootstrap_path[256];
     static char cmd[512];
     static char *envp[] = { "PATH=/system/bin", NULL };
     static char *argv[] = { (char *)sh, "-c", cmd, NULL };
-    snprintf(cmd, sizeof(cmd), "touch /dev/dfm0; exec %s", bootstrap);
+
+    if (df_data_dir && df_data_dir[0]) {
+        /* The path is interpolated into a single sh -c argument, so reject
+         * anything with shell metacharacters or of an implausible length. */
+        if (df_data_dir[0] != '/' || strlen(df_data_dir) > 200 ||
+            strpbrk(df_data_dir, " ;|&$`'\"\\") ||
+            snprintf(bootstrap_path, sizeof(bootstrap_path), "%s/bootstrap", df_data_dir)
+                    >= (int)sizeof(bootstrap_path)) {
+            pr_err("dfroot: rejecting df_data_dir\n");
+            return -EINVAL;
+        }
+    } else {
+        strcpy(bootstrap_path, bootstrap_default);
+    }
+    snprintf(cmd, sizeof(cmd), "touch /dev/dfm0; exec %s", bootstrap_path);
 
     // Symbol finder
     kln_kp = (struct kprobe){ .symbol_name = "kallsyms_lookup_name" };
